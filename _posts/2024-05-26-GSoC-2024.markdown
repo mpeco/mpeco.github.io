@@ -1,0 +1,17 @@
+---
+layout: post
+title:  "GSoC 2024: Introduction"
+date:   2024-05-26 19:53:12 -0300
+tags: gsoc rtems
+---
+Hello! I was thankfully selected to participate in the 2024 GSoC under the RTEMS organization for the project "Continue the Development of the x86_64 BSP".
+
+The x86_64 port and BSP was initially developed by Amaan Cheval for the 2018 GSoC. Later, in 2023, Karel Gardas added multiboot2 and UEFI services support in this [commit][commit]. Therefore, there are currently two methods of building the amd64 BSP, "amd64" and "amd64efi".
+
+Ultimately, the project aims to advance the development of the x86_64 BSP to the point where it has a BSP tester for the rtems-test tool and is able to pass all tests in the test suite, which should be achieved by implementing ACPICA support, Symmetric Multiprocessing, Floating Point support and Thread Local Storage support. Furthermore, in case there is still time in the program after all that is done, continue implementing additional features, such as PCI and libbsd support.
+
+I chose this project because I've written a simple x86_64 bootloader and kernel which gave me a lot of familiarity and knowledge about the architecture.
+
+I look forward to making great progress during the program and will be posting updates about the development of the BSP throughout my journey.
+
+[commit]: https://gitlab.rtems.org/rtems/rtos/rtems/-/commit/bf53ff2de2c2dab5b3e2186eac5310e78b38e413

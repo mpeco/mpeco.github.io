@@ -1,0 +1,86 @@
+---
+layout: post
+title:  "Floating-Point Context Switching in RTEMS and x86_64"
+date:   2024-08-08 12:27:28 -0300
+tags: gsoc rtems
+---
+One of my objectives for my [2024 Google Summer of Code (GSoC) project][project] was to ensure that the [AMD64 BSP][BSP] had full support for floating-point operations, particularly through Streaming SIMD Extensions (SSE). This is crucial because the x86_64 architecture requires at least SSE support as a minimum standard.
+
+Since the AMD64 BSP is designed exclusively for UEFI-capable systems, the initial step of enabling SSE is unnecessary. The firmware takes care of this before handing off the system, as detailed in the [UEFI specification][UEFI].
+
+This meant that what was still remaining for floating-point operations to be fully supported was saving and restoring the SSE state on interrupts and context switches.
+
+### Saving and Restoring Floating-point State in Interrupts
+
+This is super simple for interrupts; the **fxsave64** instruction takes care of saving the entire x87 FPU, MMX, and SSE state, which takes up 512 bytes. We also need to reset the state of the x87 FPU Control Word and the MXCSR register since we can't know whether or not the interrupt handler will use floating-point operations:
+
+```asm
+  /* Save x87 FPU, MMX and SSE state */
+.set FXSAVE_SIZE, 512
+  /* Make space for FXSAVE */
+  subq $FXSAVE_SIZE, rsp
+  fwait
+  fxsave64 (rsp)
+  /* Reset to a clean state */
+  fninit
+  subq $4, rsp
+  movl $0x1F80, (rsp)
+  ldmxcsr (rsp)
+  addq $4, rsp
+```
+
+And then, after handling the interrupt, the instruction **fxrstor64** will restore the entire state saved by **fxsave64**:
+
+```asm
+  /* Restore x87 FPU, MMX and SSE state */
+  fwait
+  fxrstor64 (CPU_INTERRUPT_FRAME_SSE_STATE)(rsp)
+```
+
+### Saving and Restoring Floating-point State in Context Switches
+
+RTEMS tasks can be configured to be floating-point tasks or not using the attribute **RTEMS_FLOATING_POINT**. This attribute is used in the internal RTEMS logic for optimizing context switches by not saving or restoring the floating-point state when not required by the tasks.
+
+Since it isn't possible to determine when GCC is going to generate code that utilizes SSE (SSE2 support is a minimum for the x86_64 architecture as per the [x86-64 SysV ABI][x86-64 SysV ABI]), the x86_64 port defines **CPU_ALL_TASKS_ARE_FP** as true, which leads RTEMS to behave as if all tasks are floating-point tasks.
+
+According to the [x86-64 SysV ABI][x86-64 SysV ABI]:
+
+>The control bits of the MXCSR register are callee-saved (preserved across calls), while the status bits are caller-saved (not preserved). The x87 status word register is caller-saved, whereas the x87 control word is callee-saved.
+
+Therefore, the MXCSR register and the x87 status word are all we need to save between context switches, which is achieved with the following macros:
+
+```c
+#define _CPU_Context_save_fp(fp_context_pp) \
+  do {                                      \
+    __asm__ __volatile__(                   \
+      "fstcw %0"                            \
+      :"=m"((*(fp_context_pp))->fpucw)      \
+    );                                      \
+    __asm__ __volatile__(                   \
+      "stmxcsr %0"                          \
+      :"=m"((*(fp_context_pp))->mxcsr)      \
+    );                                      \
+  } while (0)
+
+#define _CPU_Context_restore_fp(fp_context_pp) \
+  do {                                         \
+    __asm__ __volatile__(                      \
+      "fldcw %0"                               \
+      :"=m"((*(fp_context_pp))->fpucw)         \
+    );                                         \
+    __asm__ __volatile__(                      \
+      "ldmxcsr %0"                             \
+      :"=m"((*(fp_context_pp))->mxcsr)         \
+    );                                         \
+  } while (0)
+```
+
+<br>
+**Merge requests related to this post:**
+- [Enable and add support for FP tasks][MR]
+
+[project]: https://summerofcode.withgoogle.com/programs/2024/projects/XP3ZBIi7
+[BSP]: https://docs.rtems.org/branches/master/user/bsps/bsps-x86_64.html#amd64
+[UEFI]: https://uefi.org/specs/UEFI/2.10/02_Overview.html#x64-platforms
+[x86-64 SysV ABI]: https://gitlab.com/x86-psABIs/x86-64-ABI
+[MR]: https://gitlab.rtems.org/rtems/rtos/rtems/-/merge_requests/95

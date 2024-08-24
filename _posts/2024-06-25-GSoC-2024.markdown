@@ -1,0 +1,46 @@
+---
+layout: post
+title:  "Bugfixes on the RTEMS x86_64 Port and Board Support Package"
+date:   2024-06-25 20:22:11 -0300
+tags: gsoc rtems
+---
+After [adding a BSP tester configuration file][post-link] for the AMD64 BSP, I was able to run all the test suites (which are valid for the BSP) on the RTEMS source tree. From a total of 599 tests, around 60 were failing, some due to features not yet implemented but most of them due to bugs. This post is a write-up on all the bugs I encountered and fixed.
+
+## [Fix ISR handler macros][Fix ISR handler macros]
+
+Every port must implement interrupt handler macros which are used by the interrupt manager API. These macros must follow a specific behavior to make sure that the interrupt state is always consistent in architecture-independent code.
+
+The previous implementation of these macros for the x86_64 port had a few deviations from what is expected. The **_CPU_ISR_Disable** would wrongfully call **amd64_enable_interrupts** instead of **amd64_disable_interrupts**.
+
+Besides that, the whole logic of how **_CPU_ISR_Disable** and **_CPU_ISR_Enable** work together was not implemented. **_CPU_ISR_Disable** is supposed to save the state of interrupts before disabling them, and **_CPU_ISR_Enable** is supposed to only effectively enable interrupts if the state that was saved by **_CPU_ISR_Disable** reports that interrupts were even enabled in the first place.
+
+## [Global constructors and destructors][Global constructors and destructors]
+
+The macro **CPU_USE_LIBC_INIT_FINI_ARRAY** was defined as FALSE for the x86_64 port, which meant the GCC-generated _init and _fini functions were used for calling global constructors and destructors instead of the LIBC alternative utilizing the .init_array and .fini_array sections, which is not meant to happen for x86_64. Even then, the .ctors and .dtors sections were placed inside the .init_array and .fini_array in the linker script, which meant the _init and _fini functions wouldn't even find the global constructors and destructors.
+
+This topic is pretty vast and hard to find information on. When trying to understand this bug, I found [this blog post][ctors_blog_post] to be the most comprehensive and detailed.
+
+## [Fix interrupts being enabled during system initialization][Fix interrupts being enabled during system initialization]
+
+Interrupts shouldn't be enabled while the system is initializing as the interrupt stack is used during this time. Two points in the code could cause interrupts to be enabled while the system was still initializing:
+
+- The code to calibrate the APIC timer would call **amd64_disable_interrupts** and **amd64_enable_interrupts** instead of the macros provided by the interrupt manager API, which makes sure interrupts wouldn't be enabled if called during system initialization.
+- In the code that restores the context on a context switch, RFLAGS would be loaded before the RSP register. When this code would be called to finish system initialization and start multitasking, an interrupt could be fired after RFLAGS is loaded (thus enabling interrupts) but before RSP is loaded, causing an interrupt to occur while the interrupt stack is still being used.
+
+## [Add rtemsrwset section to linker script][Add rtemsrwset section to linker script]
+
+The rtemsrwset section wasn't included in the linker script for the amd64 BSP.
+
+<br>
+**Merge requests related to this post:**
+- [Fix ISR handler macros][Fix ISR handler macros]
+- [Global constructors and destructors][Global constructors and destructors]
+- [Fix interrupts being enabled during system initialization][Fix interrupts being enabled during system initialization]
+- [Add rtemsrwset section to linker script][Add rtemsrwset section to linker script]
+
+[post-link]: {% post_url 2024-06-13-GSoC-2024 %}
+[Fix ISR handler macros]: https://gitlab.rtems.org/rtems/rtos/rtems/-/merge_requests/71
+[Global constructors and destructors]: https://gitlab.rtems.org/rtems/rtos/rtems/-/merge_requests/75
+[ctors_blog_post]: https://maskray.me/blog/2021-11-07-init-ctors-init-array
+[Fix interrupts being enabled during system initialization]: https://gitlab.rtems.org/rtems/rtos/rtems/-/merge_requests/81
+[Add rtemsrwset section to linker script]: https://gitlab.rtems.org/rtems/rtos/rtems/-/merge_requests/82

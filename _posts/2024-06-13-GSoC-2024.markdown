@@ -1,0 +1,103 @@
+---
+layout: post
+title:  "Adding a BSP Tester Config to RTEMS"
+date:   2024-06-13 13:27:01 -0300
+tags: gsoc rtems
+---
+The RTEMS project contains multiple test suites which offer great coverage over the implementation of various functionalities. To run these tests for a BSP using the RTEMS test tool, a configuration file is required. Writing a BSP tester configuration file for the AMD64 BSP was one of the first tasks I got done for my GSoC 2024 project so I could easily look for any bugs in the existing code.
+
+The whole purpose of this configuration file is to tell the rtems-test tool how it should run every compiled binary in the test suite for that specific BSP. This can range from running tests in real hardware using tools like JTAG to using emulators like QEMU. Since the AMD64 BSP can be built to be compatible with both the FreeBSD bootloader and also multiboot2 bootloaders, I wrote two different BSP tester configuration files:
+
+## AMD64 (FreeBSD Bootloader):
+
+The configuration file for this case is the following:
+
+```sh
+[amd64_qemu]
+bsp                     = amd64
+arch                    = x86_64
+target_exe_filter       = /\.exe/.exe.img/
+bsp_qemu_image_type     = -drive
+bsp_qemu_image_path     = "format=raw,file=%{test_executable}.img"
+bsp_qemu_opts           = %{qemu_opts_base} %{qemu_opts_serial} -m 512M -bios %{amd64_ovmf_path} -drive "format=raw,file=%{test_executable}.boot.img"
+qemu_use_serial_console = yes
+tester                  = %{_rtscripts}/qemu.cfg
+# Path to FreeBSD boot image configured to boot /rtems, TODO: Add OVMF to RSB
+requires                = amd64_freebsd_boot_image_path, amd64_ovmf_path
+
+target_pretest_command = mkdir @EXE@-dir
+                         cp @EXE@ @EXE@-dir/rtems
+                         makefs -t ffs -o version=2 @FEXE@ @EXE@-dir
+                         rm -r @EXE@-dir
+                         # Copy the boot image so tests can run in parallel
+                         cp %{amd64_freebsd_boot_image_path} @EXE@.boot.img
+
+target_posttest_command = rm @EXE@.boot.img
+                          rm @FEXE@
+```
+
+The **requires** variable specifies that the user needs to pass two values when running the rtems-test tool for this BSP. **amd64_freebsd_boot_image_path** should be the path to an image file containing the FreeBSD bootloader configured to boot the kernel at /rtems (the documentation will be updated to describe how this boot image file should be created), **amd64_ovmf_path** should be the path to [OVMF][OVMF].
+
+**target_pretest_command** specifies a shell script that will be run before the execution of every test. **@EXE@** expands to the full path to the binary being run in the current test, meanwhile **@FEXE@** expands to the filtered path to that binary. The filtered path is defined by **target_exe_filter** which, in this case, matches the ".exe" in the binary and switches it to ".exe.img". The script in this configuration file uses the [makefs][makefs] tool to create a UFS image file with only the test binary as "rtems" on the top-most directory. **target_posttest_command** specifies a shell script that is run after the execution of every test, and it simply cleans up any file created.
+
+The **bsp_qemu_*** variables define the parameters that are going to be passed to QEMU to execute the current test. In the case of this configuration file, two **-drive** flags are passed with raw image files, the first being the boot image and the second the image created by **target_pretest_command** with the test binary. The **-bios** flag is also passed to use OVMF for the UEFI firmware.
+
+## AMD64EFI (Multiboot2 Bootloader):
+
+```sh
+[amd64efi_grub_qemu]
+bsp                     = amd64efi
+arch                    = x86_64
+target_exe_filter       = /\.exe/.exe.img/
+bsp_qemu_image_type     = -drive
+bsp_qemu_image_path     = "format=raw,file=%{test_executable}.img"
+bsp_qemu_opts           = %{qemu_opts_base} %{qemu_opts_serial} -bios %{amd64_ovmf_path}
+qemu_use_serial_console = yes
+tester                  = %{_rtscripts}/qemu.cfg
+# TODO: Add OVMF to RSB
+requires                = amd64_ovmf_path
+
+target_pretest_command = mkdir @EXE@-dir
+                         mkdir -p @EXE@-dir/EFI/BOOT
+                         grub-mkstandalone --format=x86_64-efi --fonts="" --locales="" --themes="" --install-modules="normal search fat multiboot2" boot/grub/grub.cfg=%{_rtscripts}/bsps/amd64efi_grub.cfg -o @EXE@-dir/EFI/BOOT/BOOTX64.EFI
+                         cp @EXE@ @EXE@-dir/rtems
+                         makefs -t msdos -s 50m @FEXE@ @EXE@-dir
+                         rm -r @EXE@-dir
+
+target_posttest_command = rm @FEXE@
+```
+
+Most of this configuration file follows the same logic as the previous one. The main difference being the fact that GRUB is used for booting the BSP. The **grub-mkstandalone** tool is used to create a single .EFI file with all the required modules and grub.cfg embedded on **target_pretest_command**. The grub.cfg file is included alongside the configuration files and is the following:
+
+```
+set timeout=0
+set default=0
+
+search --file --set=root /rtems
+
+menuentry 'RTEMS' {
+    multiboot2 /rtems text_mode=-1
+    boot
+}
+```
+
+## Adding The Configuration Files to the Test Tool:
+
+The RTEMS test tool is contained within the [RTEMS Tools source tree][rtems-tools]. To add these configuration files to the test tool is as simple as adding them under **tester/rtems/testing/bsps**.
+
+After adding the configuration files and rebuilding the RTEMS tools, the test suites could be run for the BSPs using rtems-test as such:
+
+```sh
+rtems-test --rtems-bsp=amd64_qemu --user-config=required_user_configs build/x86_64/amd64/testsuites/
+```
+
+<br>
+**Merge requests related to this post:**
+- [Add amd64 tester configurations][MR1]
+- [Add makefs to the RTEMS Source Builder][MR2]
+
+[OVMF]: https://github.com/tianocore/tianocore.github.io/wiki/OVMF
+[makefs]: https://github.com/kusumi/makefs
+[rtems-tools]: https://gitlab.rtems.org/rtems/tools/rtems-tools
+[MR1]: https://gitlab.rtems.org/rtems/tools/rtems-tools/-/merge_requests/3
+[MR2]: https://gitlab.rtems.org/rtems/tools/rtems-source-builder/-/merge_requests/24

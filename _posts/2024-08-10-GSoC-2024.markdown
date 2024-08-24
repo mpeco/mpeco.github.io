@@ -1,0 +1,137 @@
+---
+layout: post
+title:  "Implementing ACPICA Support in an Operating System"
+date:   2024-08-10 18:36:10 -0300
+tags: gsoc rtems
+---
+ACPICA (ACPI Component Architecture) is a reference implementation of the Advanced Configuration and Power Interface (ACPI) specification. It simplifies the process of implementing ACPI support in an operating system by providing an OS-independent ACPI implementation that can be easily integrated into any OS.
+
+Integrating ACPICA into RTEMS (more specifically the [AMD64 BSP][BSP]) was one of the major goals of my [2024 Google Summer of Code (GSoC) project][project]. During this process, I noticed there isn't a lot of information on implementing ACPICA support for an OS. Therefore, I decided that rather than focusing on the RTEMS aspects, this post will cover the general process of integrating ACPICA into an operating system.
+
+## Importing the ACPICA files
+
+The ACPICA project is developed and maintained on a [GitHub repository][ACPICARepo], though the source code can also be acquired on [Intel's website][IntelACPICADownload]. The files we will be looking to import are located in **source/include** and **source/components**. Note that both **source/components/debugger** and **source/components/disassembler** are optional components.
+
+One specific ACPICA file will need to be modified, that being **source/include/platform/acenv.h**. This file contains host-specific includes for host-specific configuration files. We need to create a configuration file specific to our OS that will be included in **acenv.h** as such:
+
+```c
+#elif defined(__rtems__)
+#include <acpi/acpica/platform/acrtems.h>
+#else
+```
+
+This is what **acrtems.h** looks like:
+
+```c
+#ifndef __ACRTEMS_H__
+#define __ACRTEMS_H__
+
+#include <stdint.h>
+
+#define ACPI_MACHINE_WIDTH      64
+
+#define COMPILER_DEPENDENT_INT64       int64_t
+#define COMPILER_DEPENDENT_UINT64      uint64_t
+
+#define ACPI_UINTPTR_T      uintptr_t
+
+#define ACPI_TO_INTEGER(p)  ((uintptr_t)(p))
+#define ACPI_OFFSET(d, f)   __offsetof(d, f)
+
+#define ACPI_USE_DO_WHILE_0
+#define ACPI_USE_LOCAL_CACHE
+#define ACPI_USE_NATIVE_DIVIDE
+#define ACPI_USE_NATIVE_MATH64
+#define ACPI_USE_SYSTEM_CLIBRARY
+#define ACPI_USE_STANDARD_HEADERS
+
+#endif /* __ACRTEMS_H__ */
+```
+
+These defines will configure the behavior of the ACPICA subsystem. Most of them are documented in the [ACPICA User Guide and Programmer Reference][ACPICARef] in case their purpose is unclear. There are a lot of configuration files for other OSes contained within **source/include/platform** in the ACPICA source tree which can be used as a base for creating your own OS configuration file. Note that this also means that most files inside **source/include/platform** don't need to be imported.
+
+## The Operating System Services Layer
+
+The Operating System Services Layer (OSL) defines a set of routines that must be implemented by the Operating System to utilize the ACPICA subsystem. This layer acts as a translation bridge between the OS-independent ACPICA code and the OS-specific functionality.
+
+The [OSDev page for ACPICA][OSDevACPICA] already contains a good list of the OSL routines that must be implemented, thus I will only include those I noticed were missing or have something noteworthy to be added. Be aware that the [ACPICA User Guide and Programmer Reference][ACPICARef] should definitely be consulted when implementing these.
+
+> **Note:** Depending on the parts of the ACPICA subsystem that will be used, not all routines need to have a working implementation. You can return **AE_SUPPORT** to signal to ACPICA that the feature is not supported.
+
+### Synchronization Routines
+
+```
+ACPI_STATUS AcpiOsCreateSemaphore(UINT32 MaxUnits, UINT32 InitialUnits, ACPI_SEMAPHORE* OutHandle)
+```
+**MaxUnits** represents the max amount of units which are allowed to hold the semaphore. **InitialUnits** represents the initial amount of units available to be held.
+
+```
+ACPI_STATUS AcpiOsDeleteSemaphore(ACPI_SEMAPHORE Handle)
+```
+Deletes the semaphore.
+
+```
+ACPI_STATUS AcpiOsWaitSemaphore(ACPI_SEMAPHORE Handle, UINT32 Units, UINT16 Timeout)
+```
+Attempts to acquire **Units** of the semaphore, waiting for **Timeout** while trying to do so. A **Timeout** of 0 (**ACPI_DO_NOT_WAIT**) means that this routine shouldn't wait and if unable to acquire **Units** it should return **AE_TIME**. A **Timeout** of 0xFFFF (**ACPI_WAIT_FOREVER**) means that this routine should wait until it is able to acquire **Units**.
+
+```
+ACPI_STATUS AcpiOsSignalSemaphore(ACPI_SEMAPHORE Handle, UINT32 Units)
+```
+Releases the semaphore **Units** amount of times. Note that this should return **AE_LIMIT** in case releasing **Units** would cause the semaphore to exceed the **MaxUnits** determined during its creation.
+
+I personally find the design for semaphores in ACPICA unnecessarily confusing and complicated. I've never seen semaphores be implemented like this and chances are you can't just directly use the semaphores your OS already has available. The [implementation I wrote for RTEMS][RTEMSACPICASemaphore] (which was heavily based on [FreeBSD implementation][FreeBSDACPICASemaphore]) required a completely new structure to properly support this design (even though RTEMS already had a semaphore implementation).
+
+On the other hand, the Linux kernel implementation completely ignores the **MaxUnits** parameter and only supports acquiring and releasing one unit at a time. So, chances are, you are fine not strictly following the ACPICA design.
+
+> **Note:** The mutex routines don't need to be implemented, as long as **ACPI_MUTEX_TYPE** isn't defined ACPICA will default to using binary semaphores through the OSL semaphore implementation for mutexes.
+
+### Output Routines
+```
+void AcpiOsPrintf(const char* Format, ...)
+```
+Self-explanatory.
+
+```
+void AcpiOsVprintf(const char* Format, va_list Args)
+```
+Self-explanatory.
+
+### Miscellaneous Routines
+
+```
+UINT64 AcpiOsGetTimer(void)
+```
+Should return the current value of the system timer in 100-nanosecond units.
+
+```
+ACPI_STATUS AcpiOsSignal(UINT32 Function, void* Info)
+```
+Signals an AML Fatal opcode or an AML Breakpoint opcode to the operating system.
+
+```
+ACPI_STATUS AcpiOsEnterSleep(UINT8 SleepState, UINT32 RegaValue, UINT32 RegbValue)
+```
+Is called to notify the operating system whenever entering an [ACPI Sleep State][ACPISleepState]. This one isn't even currently documented in the ACPICA Programmer Reference so I'm not sure what **RegaValue** and **RegbValue** stand for.
+
+## Updating the ACPICA Code
+
+When deciding how the ACPICA code imported in the RTEMS source tree should be kept up to date, two possible methods were brought up. The FreeBSD method, which involves using a script that unpacks new ACPICA releases and reorganizes the files so they fit the file structure we imported them in. Or the Linux kernel method, which entails having a script that would generate patch files for each ACPICA commit in a way they could be applied on our source tree.
+
+We decided to follow the Linux kernel's approach, which led to the creation of this [Python script][ACPICAPythonScript]. The script processes a list or range of ACPICA commits and generates a source tree containing only the files relevant to RTEMS, organized in the correct path hierarchy. The script then produces a patch for each commit. These patches can be applied to the RTEMS source tree, enabling us to track the history of relevant ACPICA changes within the RTEMS source tree.
+
+<br>
+**Merge requests related to this post:**
+- [Add ACPICA support to the amd64 BSP][MR]
+
+[BSP]: https://docs.rtems.org/branches/master/user/bsps/bsps-x86_64.html#amd64
+[project]: https://summerofcode.withgoogle.com/programs/2024/projects/XP3ZBIi7
+[ACPICARepo]: https://github.com/acpica/acpica
+[IntelACPICADownload]: https://www.intel.com/content/www/us/en/developer/topic-technology/open/acpica/download.html
+[ACPICARef]: https://www.intel.com/content/www/us/en/developer/topic-technology/open/acpica/documentation.html
+[OSDevACPICA]: https://wiki.osdev.org/ACPICA#OS_Layer
+[ACPISleepState]: https://uefi.org/htmlspecs/ACPI_Spec_6_4_html/16_Waking_and_Sleeping/sleeping-states.html
+[RTEMSACPICASemaphore]: https://gitlab.rtems.org/rtems/rtos/rtems/-/blob/main/bsps/shared/acpi/osl/osl_sync.c
+[FreeBSDACPICASemaphore]: https://cgit.freebsd.org/src/tree/sys/dev/acpica/Osd/OsdSynch.c
+[ACPICAPythonScript]: https://gitlab.rtems.org/rtems/tools/rtems-tools/-/merge_requests/21
+[MR]: https://gitlab.rtems.org/rtems/rtos/rtems/-/merge_requests/119

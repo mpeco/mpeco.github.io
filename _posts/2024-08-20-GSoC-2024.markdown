@@ -1,0 +1,145 @@
+---
+layout: post
+title:  "Thread-Local Storage in RTEMS and x86_64"
+date:   2024-08-20 17:05:01 -0300
+tags: gsoc rtems
+---
+Thread-Local Storage (TLS) is a programming method that gives each thread in a multi-threaded application its own exclusive set of variables. This isolation ensures that data accessed by one thread does not conflict with or modify data accessed by another thread. By keeping thread-specific data separate, TLS helps prevent concurrency issues, making it easier to manage state and maintain consistency across threads in complex, parallel-processing environments.
+
+Implementing TLS support to the [AMD64 BSP][BSP] was the last task I completed in my [2024 Google Summer of Code (GSoC) project][project]. This blog post contains the information I learned about TLS and should also serve as a good foundation for enabling TLS support in any RTEMS architecture port.
+
+## Implementing Thread-Local Storage Support for an RTEMS Port
+
+The TLS support in RTEMS requires that the architecture port provides the few following components:
+
+### Linker Symbols
+
+Besides the common .tdata and .tbss sections for storing the thread-local variables, RTEMS requires the following linker symbols which it uses for defining the TLS allocation size and alignment in [tlsallocsize.c][tlsallocsize.c]:
+
+```
+  _TLS_Data_size = _TLS_Data_end - _TLS_Data_begin;
+  _TLS_Data_begin = _TLS_Data_size != 0 ? _TLS_Data_begin : _TLS_BSS_begin;
+  _TLS_Data_end = _TLS_Data_size != 0 ? _TLS_Data_end : _TLS_BSS_begin;
+  _TLS_BSS_size = _TLS_BSS_end - _TLS_BSS_begin;
+  _TLS_Size = _TLS_BSS_end - _TLS_Data_begin;
+  _TLS_Alignment = MAX (ALIGNOF (.tdata), ALIGNOF (.tbss));
+```
+
+### Initializing the TLS Area and Saving It in the Task's Context
+
+When initializing a task, RTEMS will use the allocation size calculated using the previously mentioned symbols to allocate space for the TLS data in the task's stack.
+
+```c
+  /* Allocate thread-local storage (TLS) area in stack area */
+  if ( tls_size > 0 ) {
+    stack_end -= tls_size;
+    the_thread->Start.tls_area = stack_end;
+  }
+```
+
+This allocated TLS area will eventually get passed down to the port-specific **_CPU_Context_Initialize**. This routine has the purpose of initializing and filling out the task's context control structure. The TLS area should then be passed to the **_TLS_Initialize_area** routine implemented in [tls.h][tls.h].
+
+```c
+  if (tls_area != NULL) {
+    tcb = (uintptr_t) _TLS_Initialize_area(tls_area);
+  } else {
+    tcb = 0;
+  }
+  the_context->fs = tcb;
+```
+
+**_TLS_Initialize_area** will perform TLS variant (which should be defined by every port through **CPU_THREAD_LOCAL_STORAGE_VARIANT**) specific operations to initialize the TLS data structure as well as copy the TLS data to the area passed to it. It will then return the thread pointer which should be used to acquire the TLS variables (though what the actual thread pointer points to will vary by TLS variant).
+
+In the case of x86_64, the thread pointer will point to a Thread Control Block. You may have noticed that the thread pointer is saved in the task context structure in a variable named "fs"; this is because, as per the [x86-64 SysV ABI][x86-64 SysV ABI], the fs segment register is used as the thread pointer.
+
+### Loading a Task's Thread Pointer
+
+Two other CPU-specific routines also need to be implemented, **_CPU_Get_TLS_thread_pointer** and **_CPU_Use_thread_local_storage**, the first one being pretty self-explanatory:
+
+```c
+static inline void *_CPU_Get_TLS_thread_pointer(
+  const Context_Control *context
+)
+{
+  return (void*) context->fs;
+}
+```
+
+**_CPU_Use_thread_local_storage** shall perform whatever port-specific operation is required to load the thread pointer of the given context. In x86_64, this entails loading the FSBASE MSR register with the thread pointer (this is further explained in [x86_64 Specific Thread-Local Storage Details](#x86_64-specific-thread-local-storage-details)).
+
+```c
+static inline void _CPU_Use_thread_local_storage(
+  const Context_Control *context
+)
+{
+  uint32_t high = (uint32_t) (context->fs >> 32);
+  uint32_t low = (uint32_t) context->fs;
+  wrmsr(FSBASE_MSR, low, high);
+}
+```
+
+Besides **_CPU_Use_thread_local_storage**, the port must also load the thread pointer whenever restoring a task's context. We don't need to save the thread pointer when performing a context switch since it never changes.
+
+## x86_64 Specific Thread-Local Storage Details
+
+### Loading the FS Register
+
+As previously mentioned, the fs segment register is used, as per the [x86-64 SysV ABI][x86-64 SysV ABI], as the thread pointer in x86_64. Loading this register used to be a much more complicated task in x86_32 (in which the gs register was used instead) since a [Global Descriptor Table][GDT] (GDT) entry had to be created with the base address pointing to the Thread Control Block. This way, when that GDT entry was loaded into the segment register, it could be used as a thread pointer.
+
+Thankfully, with the addition of the FSBASE and GSBASE MSR registers, this process is much simpler in x86_64. You can simply load the MSR register with the address of the Thread Control Block to use a segment register as the thread pointer. The following code is contained in [x86_64-context-switch.S][x86_64-context-switch.S] and is used to update the thread pointer when restoring a context.
+
+```asm
+  movq CPU_CONTEXT_CONTROL_FS(r10), rax
+  /* High bits in %edx and low bits in %eax */
+  movq rax, rdx
+  shrq $32, rdx
+  movl $FSBASE_MSR, %ecx
+  wrmsr
+```
+
+> **Note:** You can still load the fs and gs registers with a GDT entry, but the base address field will be ignored.
+
+### The Thread-Local Storage Variant
+
+x86_64 utilizes the TLS variant 2. The ["ELF Handling For Thread-Local Storage"][ELF Handling For Thread-Local Storage] PDF states that, for x86_32 (aka IA-32):
+
+>"Since the IA-32 architecture is low on registers, the thread register is encoded indirectly through the %gs segment register. The only requirement about this register is that the actual thread pointer tpt can be loaded from the absolute address 0 via the %gs register."
+
+It then states in the x86_64 specific section that:
+
+>"The x86-64 ABI is virtually the same as the IA-32 ABI."
+
+This means that both x86_64 and x86_32 must contain a pointer to the Thread Control Block (TCB) itself as the first field of the TCB. This leads to conditional compilation directives in [tls.h][tls.h] which had to be updated to also include the x86_64 architecture, like the following:
+
+```c
+static inline void _TLS_Initialize_TCB_and_DTV(
+  void                      *tls_data,
+  TLS_Thread_control_block  *tcb,
+  TLS_Dynamic_thread_vector *dtv
+)
+{
+#if defined(__i386__) || defined(__x86_64__)
+  (void) dtv;
+  tcb->tcb = tcb;
+#else
+  tcb->dtv = dtv;
+  dtv->generation_number = 1;
+  dtv->tls_blocks[0] = tls_data;
+#endif
+}
+```
+> **Note:** In the TLS variant 2, the location of the pointer to the Dynamic Thread Vector (DTV) is not specified, meaning it is up to runtime to decide how to store and acquire it and that it shouldn't be included in the TCB.
+
+<br>
+**Merge requests related to this post:**
+- [x86_64: Add TLS support][MR]
+
+[BSP]: https://docs.rtems.org/branches/master/user/bsps/bsps-x86_64.html#amd64
+[project]: https://summerofcode.withgoogle.com/programs/2024/projects/XP3ZBIi7
+[tlsallocsize.c]: https://gitlab.rtems.org/rtems/rtos/rtems/-/blob/main/cpukit/score/src/tlsallocsize.c
+[tls.h]: https://gitlab.rtems.org/rtems/rtos/rtems/-/blob/main/cpukit/include/rtems/score/tls.h
+[x86-64 SysV ABI]: https://gitlab.com/x86-psABIs/x86-64-ABI
+[GDT]: https://wiki.osdev.org/Global_Descriptor_Table
+[x86_64-context-switch.S]: https://gitlab.rtems.org/rtems/rtos/rtems/-/blob/main/cpukit/score/cpu/x86_64/x86_64-context-switch.S
+[ELF Handling For Thread-Local Storage]: https://www.uclibc.org/docs/tls.pdf
+[MR]: https://gitlab.rtems.org/rtems/rtos/rtems/-/merge_requests/192

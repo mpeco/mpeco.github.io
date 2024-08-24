@@ -1,0 +1,156 @@
+---
+layout: post
+title:  "Symmetric Multiprocessing in RTEMS and x86_64"
+date:   2024-08-16 11:10:22 -0300
+tags: gsoc rtems
+---
+Symmetric Multiprocessing (SMP) is a computing architecture where two or more identical processors are connected to a single shared main memory and are controlled by a single operating system instance.
+
+Implementing SMP support to the [AMD64 BSP][BSP] was one of the main goals in my [2024 Google Summer of Code (GSoC) project][project]. This blog post contains all the information I learned about implementing SMP in an RTEMS BSP. It should serve as a solid foundation for implementing SMP in any BSP.
+
+## BSP Specific Symmetric Multiprocessing Routines
+
+Symmetric Multiprocessing can be enabled by adding the RTEMS_SMP build option as long as the BSP provides support for it. A BSP supporting SMP must implement the following routines:
+
+### _CPU_SMP_Initialize
+
+This is the first BSP routine RTEMS will call when initializing SMP. It must perform the CPU specific SMP initialization (if any) and then return the number of available processors. The value returned is compared to [CONFIGURE_MAXIMUM_PROCESSORS][CONFIGURE_MAXIMUM_PROCESSORS] to determine how many processors should actually be initialized and used.
+
+The implementation of this routine on the AMD64 BSP looks like this:
+
+```c
+uint32_t _CPU_SMP_Initialize(void)
+{
+  copy_trampoline();
+  return lapic_get_num_of_procesors();
+}
+```
+
+Application Processors (AP) initialized in x86_64 must start executing from 4KB pages under 1MB in memory, thus the trampoline code is copied to a valid page under 1MB in memory by **copy_trampoline**.
+
+### _CPU_SMP_Get_current_processor
+
+RTEMS addresses each specific processor by its processor index, the set of these processor indices being the range of integers starting from zero up to the processor count minus one. This routine must return the processor index for the currently executing processor.
+
+This means that the BSP must provide a method to obtain the index of the current processor, which may not always be trivial. In x86_64, a processor ID would be represented by its Local [APIC][APIC] ID. Though it is common for these IDs to be a contiguous set of numbers starting from zero, it's not safe to assume that. Therefore, in the AMD64 BSP, a mapping is made to relate Local APIC IDs to processor indexes, and thus the AMD64 BSP implementation looks like this:
+
+```c
+uint32_t _CPU_SMP_Get_current_processor(void)
+{
+  uint8_t lapic_id = lapic_get_id();
+  return amd64_lapic_to_cpu_map[lapic_id];
+}
+```
+
+### _CPU_SMP_Start_processor
+
+This routine will be called on the boot processor for every processor configured. It must initialize the processor corresponding to the processor index and return whether or not it could be successfully started.
+
+The AMD64 BSP implementation starts the AP and then waits for it to set a flag signaling it is successfully up and running. Whether or not this flag is set before the timeout determines if it returns true or false.
+
+```c
+bool _CPU_SMP_Start_processor(uint32_t cpu_index)
+{
+  has_ap_started = false;
+  lapic_start_ap(cpu_index, TRAMPOLINE_PAGE_VECTOR);
+  return wait_for_ap(WAIT_FOR_AP_TIMEOUT_MS);
+}
+```
+
+### _CPU_SMP_Finalize_initialization
+
+This routine is called on the boot processor after [_CPU_SMP_Start_processor](#_cpu_smp_start_processor) has been called on all processors. It should perform the final steps of the CPU specific SMP initialization.
+
+On the AMD64 BSP, as well as most BSPs, this routine installs the handler for inter-processor interrupts.
+
+```c
+void _CPU_SMP_Finalize_initialization(uint32_t cpu_count)
+{
+  if (cpu_count > 0) {
+    rtems_status_code sc = rtems_interrupt_handler_install(
+      BSP_VECTOR_IPI,
+      "IPI",
+      RTEMS_INTERRUPT_UNIQUE,
+      bsp_inter_processor_interrupt,
+      NULL
+    );
+    assert(sc == RTEMS_SUCCESSFUL);
+  }
+}
+```
+
+### _CPU_SMP_Send_interrupt
+
+This routine should send an inter-processor interrupt to the specified processor.
+
+On the AMD64 BSP, this is done through the Local [APIC][APIC].
+
+```c
+void _CPU_SMP_Send_interrupt(uint32_t target_processor_index)
+{
+  lapic_send_ipi(target_processor_index, BSP_VECTOR_IPI);
+}
+```
+
+### _CPU_SMP_Prepare_start_multitasking
+
+This routine should perform any CPU specific operations to prepare the processor to start multitasking.
+
+On the AMD64 BSP, as well as all other BSPs which currently implement SMP, this does nothing.
+
+## Context Switching in Symmetric Multiprocessing Systems
+
+In RTEMS, all SMP capable architectures need some synchronization logic during context switching to ensure the previously running task context is completely saved before it is restored on a different processor. This section explains this logic using the code I wrote contained in [x86_64-context-switch.S][x86_64-context-switch.S] (this is executed after saving the context of the previously running task and before restoring the context of the heir task):
+
+```asm
+  leaq    PER_CPU_INTERRUPT_FRAME_AREA + CPU_INTERRUPT_FRAME_SIZE(r11), rsp
+  movw    $0, CPU_CONTEXT_CONTROL_IS_EXECUTING(r8)
+```
+
+Since the previous task is not being executed in this processor anymore, we can't keep using its stack. RTEMS allocates a temporary interrupt stack for every configured processor which we load into the stack pointer register before we can acquire the stack of the heir task. We also set the "is executing" flag on the previous task's control structure to zero, signifying it is not being executed by any processor.
+
+```asm
+.check_is_executing:
+  lock btsw $0, CPU_CONTEXT_CONTROL_IS_EXECUTING(r10) /* Indicator in carry flag */
+  jnc       .restore
+```
+
+We then atomically set the executing flag of the heir task. In case this flag wasn't already set, we simply move on with restoring the heir task as we are sure this processor is the only one accessing its context. Otherwise, we run the following code to check for a potential new heir since the context of the current one isn't immediately available:
+
+```asm
+.get_potential_new_heir:
+  /* We may have a new heir */
+
+  /* Read the executing and heir */
+  movq    PER_CPU_OFFSET_EXECUTING(r11), r8
+  movq    PER_CPU_OFFSET_HEIR(r11), r9
+
+  /*
+   * Update the executing only if necessary to avoid cache line
+   * monopolization.
+   */
+  cmpq    r8, r9
+  je      .check_is_executing
+
+  /* Calculate the heir context pointer */
+  addq    r9, r10
+  subq    r8, r10
+
+  /* Update the executing */
+  movq    r9, PER_CPU_OFFSET_EXECUTING(r11)
+
+  jmp     .check_is_executing
+```
+
+> **Note:** All this code only runs when RTEMS_SMP is defined.
+
+<br>
+**Merge requests related to this post:**
+- [x86_64/amd64: Add SMP support][MR]
+
+[BSP]: https://docs.rtems.org/branches/master/user/bsps/bsps-x86_64.html#amd64
+[project]: https://summerofcode.withgoogle.com/programs/2024/projects/XP3ZBIi7
+[CONFIGURE_MAXIMUM_PROCESSORS]: https://docs.rtems.org/branches/master/c-user/config/general.html#configure-maximum-processors
+[APIC]: https://wiki.osdev.org/APIC
+[x86_64-context-switch.S]: https://gitlab.rtems.org/rtems/rtos/rtems/-/blob/main/cpukit/score/cpu/x86_64/x86_64-context-switch.S
+[MR]: https://gitlab.rtems.org/rtems/rtos/rtems/-/merge_requests/169

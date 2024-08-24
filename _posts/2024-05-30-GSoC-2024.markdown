@@ -1,0 +1,28 @@
+---
+layout: post
+title:  "GSoC 2024: My First Issue and Contribution"
+date:   2024-05-30 11:42:11 -0300
+tags: gsoc rtems
+---
+While preparing to submit my GSoC 2024 "Continue the Development of the x86_64 BSP" proposal to the RTEMS project, one of the first things I did was, unsurprisingly, building and running the current version of the x86_64 BSP on my machine, which led me to finding the first issue that would have to be resolved:
+
+![General Protection Fault Image](/assets/images/2024-05-30-GPF.png)
+
+The cause of this fatal error is actually an x86 exception. Since no handler is installed for the first 32 interrupt vectors (the range reserved by x86 for CPU exceptions), RTEMS throws a fatal error of type "RTEMS_FATAL_SOURCE_SPURIOUS_INTERRUPT" when trying to dispatch an exception. In this case, the fatal code is actually the vector of the interrupt. Since the fatal code is 13, we know that what actually happened was a [General Protection Fault][GPF].
+
+This exception is quite tricky since it doesn't have a singular reason as to why it happens. To make it easier, I made a temporary alteration to the code so I could print the address of the instruction. What I instantly noticed was that it was an [SSE][SSE] instruction, which indicates that the probable cause for the exception was the memory address used in the instruction not being 16-byte aligned as it should be. What I could also notice was that the memory address in question was a stack address, which should definitely not happen since the compiler would make sure any stack address used in SSE operations would be properly aligned.
+
+After exploring possible causes, I found that the reason for this misalignment was a misunderstanding of the [x86-64 SysV ABI][x86-64 SysV ABI] by the current implementation of the BSP. Both in the first piece of assembly code executed in the BSP startup and when setting up the context for a new task, the stack would be set up with an 8-byte misalignment from what is expected by the ABI, leading the compiler-generated code to unknowingly cause the exception.
+
+I had originally sent a patch fixing this bug to the development mailing list, but it didn't get reviewed. However, I did get the changes in the codebase once the RTEMS project migrated to GitLab (which happened together with the start of GSoC 2024).
+
+<br>
+**Merge requests related to this post:**
+- [x86_64: Fix stack alignment for x86-64 SysV ABI][MR1]
+- [bsps/amd64: Add comments to start.s][MR2]
+
+[GPF]: https://en.wikipedia.org/wiki/General_protection_fault
+[SSE]: https://en.wikipedia.org/wiki/Streaming_SIMD_Extensions
+[x86-64 SysV ABI]: https://gitlab.com/x86-psABIs/x86-64-ABI
+[MR1]: https://gitlab.rtems.org/rtems/rtos/rtems/-/merge_requests/34
+[MR2]: https://gitlab.rtems.org/rtems/rtos/rtems/-/merge_requests/48
