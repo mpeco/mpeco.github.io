@@ -3,10 +3,11 @@ layout: post
 title:  "GSoC 2024: Final Report"
 date:   2024-08-22 19:42:05 -0300
 tags: gsoc rtems
+redirect_from: /gsoc-24-final-report/
 ---
 ## The Project
 
-My Google Summer of Code (GSoC) project, [Continue the Development of the x86_64 BSP][project], sought to advance the development of this BSP and of the x86_64 architecture port in [RTEMS][] as much as possible. Fixing bugs and implementing a set of RTEMS supported features which were still missing from it.
+My Google Summer of Code (GSoC) project, [Continue the Development of the x86_64 BSP][project], sought to advance the development of this BSP and of the x86_64 architecture port in [RTEMS][RTEMS] as much as possible. Fixing bugs and implementing a set of RTEMS supported features which were still missing from it.
 
 ## Expectations and Results
 
