@@ -1,0 +1,106 @@
+---
+layout: post
+title:  "GSoC 2024: Final Report"
+date:   2024-08-22 19:42:05 -0300
+tags: gsoc rtems
+---
+## The Project
+
+My Google Summer of Code (GSoC) project, [Continue the Development of the x86_64 BSP][project], sought to advance the development of this BSP and of the x86_64 architecture port in [RTEMS][] as much as possible. Fixing bugs and implementing a set of RTEMS supported features which were still missing from it.
+
+## Expectations and Results
+
+The original goals I had set upon at the start of the project were to implement ACPICA support, Symmetric Multiprocessing, Floating Point support, and Thread Local Storage support. Additionally, also adding a BSP tester for the [RTEMS tester][rtems-test] tool, with the ultimate goal of ensuring the BSP successfully passed all tests in the test suite.
+
+By the end of the project, all of the major features listed above have been successfully implemented, with most already being merged by the time of writing this. The BSP tester has also been added, and thanks to the features implemented and some bug fixes, it can successfully run the majority of tests in the base test suite. However, a few tests still fail, which I plan to investigate after GSoC.
+
+## The Code
+
+Rather than having separate sections for topics like challenges and learnings, I thought it would be more structured to list out the subtasks I completed throughout the project and discuss these aspects for each one of them. These will be listed by their respective blog posts. The merge requests containing the code I wrote for every single one of these changes is listed at the end of every blog post. Alternatively, every single merge request is listed in the [GitLab epic for the project][epic].
+
+### [My First Issue and Contribution][post1]
+
+This was the first issue I tackled which happened even before GSoC started. When I was trying to build and run the BSP while writing my proposal, I noticed it had, at some point, been broken. It would always throw a General Protection Fault due to tasks being created with a misaligned stack (which in turn would cause SSE operations on misaligned memory addresses).
+
+Due to the nature of the bug, debugging this was quite a hassle, which was good learning experience for the project since I got a good idea on how to debug RTEMS from it.
+
+### [Adding a BSP Tester Config to RTEMS][post2]
+
+It made sense to start with the BSP tester so that I could run the test suite. The RTEMS tester is a tool contained within the [rtems-tools][rtems-tools] repository, so developing this took me getting familiar with it.
+
+Booting on x86_64 is somewhat of a hassle when compared to the other architectures RTEMS supports. It took a lot of learning about the bootloaders used (GRUB and the FreeBSD bootloader) for creating self-contained configurations which could be easily put in some image file alongside the executable for each test for QEMU to ultimately run.
+
+The final design I came up with help from my mentors also involved using the [makefs][makefs] tool, which meant I also had to learn how to add a package to the [RTEMS Source Builder][rsb].
+
+### [Bugfixes on the RTEMS x86_64 Port and Board Support Package][post3]
+
+After adding the tester configuration for the AMD64 BSP and running the test suite, I noticed many failing tests, which led me on a bug hunt to fix them.
+
+The most noteworthy of the bugs was that, whenever switching to the first task, interrupts would be enabled before the task's stack had been loaded, which meant that, due to the interrupt stack being used temporarily during system initialization, an interrupt would smash its own stack since it would switch to the start of the interrupt stack (which it had already been using).
+
+This was hell to debug since it wouldn't consistently happen, although the process of fixing it helped me learn a lot about the RTEMS system initialization process.
+
+### [Floating-Point Context Switching in RTEMS and x86_64][post4]
+
+This was pretty straightforward to implement since most of the code is the same as the i386 implementation. The AMD64 BSP is designed for UEFI-capable machines which hand off the system with [SSE][SSE] already enabled.
+
+### [Implementing ACPICA Support in an Operating System][post5]
+
+This was definitely the task I took the most time on. The biggest challenge here was the lack of information on how to integrate [ACPICA][ACPICA] into an operating system, which led me to having to read a lot of source code of other implementations, mainly FreeBSD. Due to this, I tried to have the blog post be about how to generally implement it rather than focusing on the RTEMS side.
+
+### [Symmetric Multiprocessing in RTEMS and x86_64][post6]
+
+I already had an idea of the x86_64 specific part of Symmetric Multiprocessing (SMP) so the biggest part of this was learning what interfaces the RTEMS SMP implementation needed from the BSP and how they should be implemented. This involved a lot of reading of the implementations in other BSPs.
+
+A noteworthy part of this was the code that had to be included in the interrupt handling and context switching to account for tasks being able to run in different processors, which definitely wasn't trivial to me.
+
+### [Thread-Local Storage in RTEMS and x86_64][post7]
+
+Thread-Local Storage is a vast and complicated topic. Thankfully, RTEMS already has an implementation for it, so I only had to learn the x86_64 specific aspects of it.
+
+## Future Work
+
+Off the top of my head, here are a few points that can still be worked on to improve the BSP:
+
+- Currently, CPU [exceptions][exceptions] have no handler, leading them to cause an RTEMS fatal error. They should ideally have a completely different handler so the stack frame can be printed;
+
+- The console driver is very bare bones; it can be expanded to be configurable and to also support framebuffer;
+
+- Currently, the heap is configured at compile time and located right after the RTEMS ELF in memory. This could be expanded to use the UEFI memory map;
+
+- I/O APIC support;
+
+- RTEMS Source Builder configuration for building [OVMF][OVMF].
+
+## Conclusion
+
+Though I had originally hoped I would be able to go beyond my original goals during this project, I took more time than I expected bug fixing and on features like ACPICA. I think these types of unexpected events are natural in software development, especially when the scope of the project is so vast, and I am overall satisfied with my contributions and how the project turned out.
+
+Throughout this project, I got to work and learn about the RTEMS project on a very broad sense, making contributions not only to the BSP and main repository but the [rtems-test][rtems-test] and [rtems-source-builder][rsb] repositories as well. I also greatly expanded my knowledge on the x86_64, learned a lot about UEFI and UEFI booting, and even learned about some topics I would have never expected to touch, such as how libc initializes C++ global constructors.
+
+The whole experience of GSoC was challenging and full of learning. It was my first real experience with open-source, I'm glad I got to do it, and I hope to be still contributing to the RTEMS projects in the foreseeable future.
+
+As a closing note, I would like to thank my GSoC mentors and the RTEMS community as a whole for reviewing my code, helping me out on [Discord][discord], and maintaining RTEMS.
+
+[AMD64]: https://docs.rtems.org/branches/master/user/bsps/bsps-x86_64.html#amd64
+[BSP]: https://docs.rtems.org/branches/master/user/bsps/index.html
+[commit]: https://gitlab.rtems.org/rtems/rtos/rtems/-/commit/bf53ff2de2c2dab5b3e2186eac5310e78b38e413
+[RTEMS]: https://gitlab.rtems.org/rtems/rtos/rtems
+[project]: https://summerofcode.withgoogle.com/programs/2024/projects/XP3ZBIi7
+[epic]: https://gitlab.rtems.org/groups/rtems/-/epics/5
+[rtems-test]: https://docs.rtems.org/branches/master/user/tools/tester.html
+[post1]: {% post_url 2024-05-30-GSoC-2024 %}
+[post2]: {% post_url 2024-06-13-GSoC-2024 %}
+[rtems-tools]: https://gitlab.rtems.org/rtems/tools/rtems-tools
+[makefs]: https://github.com/kusumi/makefs
+[rsb]: https://gitlab.rtems.org/rtems/tools/rtems-source-builder
+[post3]: {% post_url 2024-06-25-GSoC-2024 %}
+[post4]: {% post_url 2024-08-08-GSoC-2024 %}
+[SSE]: https://en.wikipedia.org/wiki/Streaming_SIMD_Extensions
+[post5]: {% post_url 2024-08-10-GSoC-2024 %}
+[ACPICA]: https://github.com/acpica/acpica
+[post6]: {% post_url 2024-08-16-GSoC-2024 %}
+[post7]: {% post_url 2024-08-20-GSoC-2024 %}
+[exceptions]: https://wiki.osdev.org/Exceptions
+[OVMF]: https://github.com/tianocore/tianocore.github.io/wiki/OVMF
+[discord]: https://www.rtems.org/discord
