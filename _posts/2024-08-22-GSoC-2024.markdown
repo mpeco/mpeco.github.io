@@ -21,7 +21,7 @@ Rather than having separate sections for topics like challenges and learnings, I
 
 ### [My First Issue and Contribution][post1]
 
-This was the first issue I tackled which happened even before GSoC started. When I was trying to build and run the BSP while writing my proposal, I noticed it had, at some point, been broken. It would always throw a General Protection Fault due to tasks being created with a misaligned stack (which in turn would cause SSE operations on misaligned memory addresses).
+This was the first issue I tackled which happened even before GSoC started. When I was trying to build and run the BSP while writing my proposal, I noticed it had, at some point, been broken. It would always throw a General Protection Fault due to tasks being created with a misaligned stack (which in turn would cause SSE operations on a misaligned memory addresses).
 
 Due to the nature of the bug, debugging this was quite a hassle, which was good learning experience for the project since I got a good idea on how to debug RTEMS from it.
 
