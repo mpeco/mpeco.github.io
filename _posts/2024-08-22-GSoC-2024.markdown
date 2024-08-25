@@ -77,7 +77,7 @@ Off the top of my head, here are a few points that can still be worked on to imp
 
 Though I had originally hoped I would be able to go beyond my original goals during this project, I took more time than I expected bug fixing and on features like ACPICA. I think these types of unexpected events are natural in software development, especially when the scope of the project is so vast, and I am overall satisfied with my contributions and how the project turned out.
 
-Throughout this project, I got to work and learn about the RTEMS project on a very broad sense, making contributions not only to the BSP and main repository but the [rtems-test][rtems-test] and [rtems-source-builder][rsb] repositories as well. I also greatly expanded my knowledge on the x86_64, learned a lot about UEFI and UEFI booting, and even learned about some topics I would have never expected to touch, such as how libc initializes C++ global constructors.
+Throughout this project, I got to work and learn about the RTEMS project on a very broad sense, making contributions not only to the BSP and main repository but the [rtems-test][rtems-test] and [rtems-source-builder][rsb] repositories as well. I also greatly expanded my knowledge on x86_64, learned a lot about UEFI and UEFI booting, and even learned about some topics I would have never expected to touch, such as how libc initializes C++ global constructors.
 
 The whole experience of GSoC was challenging and full of learning. It was my first real experience with open-source, I'm glad I got to do it, and I hope to be still contributing to the RTEMS projects in the foreseeable future.
 
