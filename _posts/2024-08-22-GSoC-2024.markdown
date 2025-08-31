@@ -13,7 +13,7 @@ My Google Summer of Code (GSoC) project, [Continue the Development of the x86_64
 
 The original goals I had set at the start of the project were to implement ACPICA support, Symmetric Multiprocessing, Floating Point support, and Thread Local Storage support. Additionally, also adding a BSP tester for the [RTEMS tester][rtems-test] tool, with the ultimate goal of ensuring the BSP successfully passed all tests in the test suite.
 
-By the end of the project, all of the major features listed above have been successfully implemented, with most already being merged by the time of writing this. The BSP tester has also been added, and thanks to the features implemented and some bug fixes, it can successfully run the majority of tests in the base test suite. However, a few tests still fail, which I plan to investigate after GSoC.
+By the end of the project, all of the major features listed above have been successfully implemented, with most already being merged by the time of writing this. The BSP tester has also been added and, thanks to the features implemented and some bug fixes, it can successfully run the majority of tests in the base test suite. However, a few tests still fail, which I plan to investigate after GSoC.
 
 ## The Code
 
